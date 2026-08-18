@@ -281,45 +281,223 @@ def orientation_accuracy(true_edges, predicted_edges):
 
     return correctly_oriented / correct_skeleton_edges
 
-def true_cpdag_edges(true_edges):
+def dag_to_cpdag(true_edges, node_names):
     """
-    Return the CPDAG representation for a small DAG.
+    Convert a known DAG into its CPDAG.
 
-    For the current sanity-check graphs:
-        A -> B -> C  ->  A -- B -- C
-        A <- B -> C  ->  A -- B -- C
-        A -> B <- C  ->  A -> B <- C
+    Parameters
+    ----------
+    true_edges : iterable of (source, target)
+        Directed edges of the true DAG.
 
-    This is intentionally limited to the three primitive DAGs.
-    We will replace this with a general DAG-to-CPDAG implementation
-    before the medium DAG experiments.
+    node_names : list[str]
+        Names of all nodes.
+
+    Returns
+    -------
+    cg : CausalGraph
+        CPDAG represented using causal-learn's graph conventions.
     """
 
+    from causallearn.graph.GraphClass import CausalGraph
+    from causallearn.graph.Edge import Edge
+    from causallearn.graph.Endpoint import Endpoint
+
+    cg = CausalGraph(
+        len(node_names),
+        node_names=node_names,
+    )
+
+    node_map = {
+        name: i
+        for i, name in enumerate(node_names)
+    }
+
+    # Start with the complete undirected graph created by CausalGraph.
+    # Remove edges that are not present in the true DAG skeleton.
     true_edges = set(true_edges)
 
-    chain = {
-        ("X1", "X2"),
-        ("X2", "X3"),
+    skeleton = {
+        frozenset((source, target))
+        for source, target in true_edges
     }
 
-    collider = {
-        ("X1", "X2"),
-        ("X3", "X2"),
+    for i in range(len(node_names)):
+        for j in range(i + 1, len(node_names)):
+
+            if frozenset((node_names[i], node_names[j])) not in skeleton:
+                edge = cg.G.get_edge(
+                    cg.G.nodes[i],
+                    cg.G.nodes[j],
+                )
+
+                if edge is not None:
+                    cg.G.remove_edge(edge)
+
+    # Identify and orient unshielded colliders.
+    #
+    # X -> Y <- Z is an unshielded collider when:
+    #   X and Z are both parents of Y
+    #   X and Z are not adjacent.
+    parents = {
+        node: []
+        for node in node_names
     }
 
-    if true_edges == chain:
-        return {
-            frozenset(("X1", "X2")),
-            frozenset(("X2", "X3")),
-        }, set()
+    for source, target in true_edges:
+        parents[target].append(source)
 
-    if true_edges == collider:
-        return {
-            frozenset(("X1", "X2")),
-            frozenset(("X2", "X3")),
-        }, {
-            ("X1", "X2"),
-            ("X3", "X2"),
-        }
+    for middle in node_names:
 
-    raise ValueError("Unsupported DAG for primitive CPDAG conversion.")
+        middle_parents = parents[middle]
+
+        for i in range(len(middle_parents)):
+            for j in range(i + 1, len(middle_parents)):
+
+                left = middle_parents[i]
+                right = middle_parents[j]
+
+                if frozenset((left, right)) in skeleton:
+                    continue
+
+                # Orient left -> middle.
+                edge = cg.G.get_edge(
+                    cg.G.nodes[node_map[left]],
+                    cg.G.nodes[node_map[middle]],
+                )
+
+                if edge is not None:
+                    cg.G.remove_edge(edge)
+
+                cg.G.add_edge(
+                    Edge(
+                        cg.G.nodes[node_map[left]],
+                        cg.G.nodes[node_map[middle]],
+                        Endpoint.TAIL,
+                        Endpoint.ARROW,
+                    )
+                )
+
+                # Orient right -> middle.
+                edge = cg.G.get_edge(
+                    cg.G.nodes[node_map[right]],
+                    cg.G.nodes[node_map[middle]],
+                )
+
+                if edge is not None:
+                    cg.G.remove_edge(edge)
+
+                cg.G.add_edge(
+                    Edge(
+                        cg.G.nodes[node_map[right]],
+                        cg.G.nodes[node_map[middle]],
+                        Endpoint.TAIL,
+                        Endpoint.ARROW,
+                    )
+                )
+
+    # Apply Meek's orientation rules.
+    from causallearn.search.ConstraintBased.PC import Meek
+
+    cg = Meek.meek(cg)
+
+    return cg
+
+def cpdag_structural_hamming_distance(graph1, graph2):
+    """
+    Compute Structural Hamming Distance (SHD) between two CPDAGs.
+
+    An error is counted when an edge is:
+    - missing
+    - extra
+    - oriented in the wrong direction
+
+    Undirected edges are treated as distinct from directed edges.
+
+    Parameters
+    ----------
+    graph1 : causal-learn GeneralGraph
+        First CPDAG.
+
+    graph2 : causal-learn GeneralGraph
+        Second CPDAG.
+
+    Returns
+    -------
+    int
+        Structural Hamming Distance.
+    """
+
+    nodes1 = graph1.get_nodes()
+    nodes2 = graph2.get_nodes()
+
+    if len(nodes1) != len(nodes2):
+        raise ValueError("Graphs must contain the same number of nodes.")
+
+    node_names1 = [node.get_name() for node in nodes1]
+    node_names2 = [node.get_name() for node in nodes2]
+
+    if set(node_names1) != set(node_names2):
+        raise ValueError("Graphs must contain the same node names.")
+
+    node_map1 = {
+        node.get_name(): node
+        for node in nodes1
+    }
+
+    node_map2 = {
+        node.get_name(): node
+        for node in nodes2
+    }
+
+    def edge_type(graph, node_a, node_b):
+        edge = graph.get_edge(node_a, node_b)
+
+        if edge is None:
+            return "none"
+
+        endpoint1 = edge.get_endpoint1()
+        endpoint2 = edge.get_endpoint2()
+
+        from causallearn.graph.Endpoint import Endpoint
+
+        if endpoint1 == Endpoint.TAIL and endpoint2 == Endpoint.TAIL:
+            return "undirected"
+
+        if endpoint1 == Endpoint.TAIL and endpoint2 == Endpoint.ARROW:
+            return "directed"
+
+        if endpoint1 == Endpoint.ARROW and endpoint2 == Endpoint.TAIL:
+            return "reverse_directed"
+
+        if endpoint1 == Endpoint.ARROW and endpoint2 == Endpoint.ARROW:
+            return "bidirected"
+
+        return "other"
+
+    distance = 0
+
+    node_names = sorted(set(node_names1))
+
+    for i in range(len(node_names)):
+        for j in range(i + 1, len(node_names)):
+
+            name_a = node_names[i]
+            name_b = node_names[j]
+
+            type1 = edge_type(
+                graph1,
+                node_map1[name_a],
+                node_map1[name_b],
+            )
+
+            type2 = edge_type(
+                graph2,
+                node_map2[name_a],
+                node_map2[name_b],
+            )
+
+            if type1 != type2:
+                distance += 1
+
+    return distance

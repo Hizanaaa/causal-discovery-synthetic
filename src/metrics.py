@@ -147,8 +147,7 @@ def causal_learn_edges(graph):
 
         elif endpoint1 == "TAIL" and endpoint2 == "TAIL":
             edge_type = "undirected"
-            source = node1
-            target = node2
+            source, target = sorted([node1, node2])
 
         elif endpoint1 == "ARROW" and endpoint2 == "ARROW":
             edge_type = "bidirected"

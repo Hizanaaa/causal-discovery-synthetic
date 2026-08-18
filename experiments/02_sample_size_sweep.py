@@ -1,4 +1,7 @@
 import time
+import csv
+
+from pathlib import Path
 
 from causallearn.search.ConstraintBased.PC import pc
 
@@ -167,6 +170,29 @@ def main():
             f"{str(result['exact_match']):>8} "
             f"{result['runtime']:>10.4f}"
         )
+
+    # Save results to CSV
+    output_path = Path("results/tables/sample_size_sweep.csv")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open("w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "n_samples",
+                "precision",
+                "recall",
+                "f1",
+                "shd",
+                "exact_match",
+                "runtime",
+            ],
+        )
+
+        writer.writeheader()
+        writer.writerows(results)
+
+    print(f"\nResults saved to: {output_path}")
 
 
 if __name__ == "__main__":
